@@ -162,6 +162,63 @@ unsigned char*** clonarMatriz3D(unsigned char*** origen, int alto, int ancho, in
     return clon;
 }
 
+// =====================================================================
+// FUNCIONES AUXILIARES DE INTERPOLACIÓN
+// =====================================================================
+
+// QUÉ: Calcula el valor interpolado de un píxel en coordenadas fraccionarias
+// usando interpolación bilineal.
+// CÓMO: Obtiene los 4 píxeles vecinos (esquinas del rectángulo que contiene el
+// punto), calcula pesos basados en distancias fraccionarias, y promedia los
+// valores con la fórmula bilineal: I = (1-a)(1-b)I00 + a(1-b)I10 + (1-a)bI01 + abI11.
+// Aplica clamping en los bordes para evitar accesos fuera de límites.
+// POR QUÉ: Necesario para operaciones de transformación geométrica (rotación,
+// escalado) que mapean píxeles a coordenadas no enteras, produciendo resultados
+// suaves sin aliasing.
+unsigned char interpolacionBilineal(unsigned char*** img, float x, float y, int c, 
+                                   int ancho, int alto) {
+    // Obtener coordenadas enteras de las 4 esquinas del rectángulo
+    int x0 = (int)floor(x);  // Esquina superior izquierda X
+    int y0 = (int)floor(y);  // Esquina superior izquierda Y
+    int x1 = x0 + 1;         // Esquina superior derecha X
+    int y1 = y0 + 1;         // Esquina inferior izquierda Y
+    
+    // Clamp coordenadas a límites válidos de la imagen
+    // Esto maneja píxeles en los bordes replicando el píxel más cercano
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= ancho) x1 = ancho - 1;
+    if (y1 >= alto) y1 = alto - 1;
+    
+    // Calcular partes fraccionarias (pesos de interpolación)
+    // a = distancia horizontal desde x0 (0.0 = en x0, 1.0 = en x1)
+    // b = distancia vertical desde y0 (0.0 = en y0, 1.0 = en y1)
+    float a = x - x0;
+    float b = y - y0;
+    
+    // Obtener valores de los 4 píxeles vecinos
+    // v00 = esquina superior izquierda
+    // v10 = esquina superior derecha
+    // v01 = esquina inferior izquierda
+    // v11 = esquina inferior derecha
+    float v00 = img[y0][x0][c];
+    float v10 = img[y0][x1][c];
+    float v01 = img[y1][x0][c];
+    float v11 = img[y1][x1][c];
+    
+    // Aplicar fórmula de interpolación bilineal
+    // Interpola primero en X (horizontalmente) para las dos filas,
+    // luego interpola en Y (verticalmente) entre los resultados
+    float resultado = (1.0f - a) * (1.0f - b) * v00  // Peso esquina superior izquierda
+                    + a * (1.0f - b) * v10            // Peso esquina superior derecha
+                    + (1.0f - a) * b * v01            // Peso esquina inferior izquierda
+                    + a * b * v11;                    // Peso esquina inferior derecha
+    
+    // Redondear y convertir a unsigned char
+    // Suma 0.5 para redondeo correcto antes del truncado
+    return (unsigned char)(resultado + 0.5f);
+}
+
 // QUÉ: Liberar memoria asignada para la imagen.
 // CÓMO: Libera cada fila y canal de la matriz 3D, luego el arreglo de filas y
 // reinicia la estructura.

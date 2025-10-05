@@ -219,6 +219,88 @@ unsigned char interpolacionBilineal(unsigned char*** img, float x, float y, int 
     return (unsigned char)(resultado + 0.5f);
 }
 
+// =====================================================================
+// FUNCIONES AUXILIARES DE CONVOLUCIÓN
+// =====================================================================
+
+// QUÉ: Genera un kernel Gaussiano 2D para operaciones de desenfoque (blur).
+// CÓMO: Asigna matriz 2D de floats, aplica fórmula Gaussiana G(x,y) = 
+// (1/(2πσ²)) * e^(-(x²+y²)/(2σ²)) para cada elemento, luego normaliza
+// dividiendo por la suma total para que todos los pesos sumen 1.0.
+// POR QUÉ: El kernel Gaussiano produce desenfoque natural preservando bordes
+// mejor que un simple promedio. La normalización garantiza que el brillo de
+// la imagen se mantenga constante después de la convolución.
+float** generarKernelGaussiano(int tamKernel, float sigma) {
+    // Validar que el tamaño del kernel sea impar
+    if (tamKernel <= 0 || tamKernel % 2 == 0) {
+        fprintf(stderr, "Error: El tamaño del kernel debe ser impar y positivo (recibido: %d)\n", 
+                tamKernel);
+        return NULL;
+    }
+    
+    // Validar que sigma sea positivo
+    if (sigma <= 0.0f) {
+        fprintf(stderr, "Error: Sigma debe ser positivo (recibido: %.2f)\n", sigma);
+        return NULL;
+    }
+    
+    // Asignar memoria para el kernel (matriz 2D de floats)
+    float** kernel = malloc(tamKernel * sizeof(float*));
+    if (!kernel) {
+        fprintf(stderr, "Error de memoria: No se pudo asignar kernel\n");
+        return NULL;
+    }
+    
+    for (int i = 0; i < tamKernel; i++) {
+        kernel[i] = malloc(tamKernel * sizeof(float));
+        if (!kernel[i]) {
+            fprintf(stderr, "Error de memoria: No se pudo asignar fila %d del kernel\n", i);
+            // Liberar filas ya asignadas
+            for (int j = 0; j < i; j++) {
+                free(kernel[j]);
+            }
+            free(kernel);
+            return NULL;
+        }
+    }
+    
+    // Calcular el offset desde el centro del kernel
+    int offset = tamKernel / 2;
+    
+    // Calcular constante de la fórmula Gaussiana: 1 / (2πσ²)
+    float constante = 1.0f / (2.0f * M_PI * sigma * sigma);
+    
+    // Calcular denominador del exponente: 2σ²
+    float denominador = 2.0f * sigma * sigma;
+    
+    float suma = 0.0f; // Acumulador para normalización
+    
+    // Generar valores del kernel usando la fórmula Gaussiana
+    for (int ky = -offset; ky <= offset; ky++) {
+        for (int kx = -offset; kx <= offset; kx++) {
+            // Calcular G(x,y) = (1/(2πσ²)) * e^(-(x²+y²)/(2σ²))
+            float exponente = -(kx * kx + ky * ky) / denominador;
+            float valor = constante * exp(exponente);
+            
+            // Almacenar en la matriz (convertir coordenadas relativas a índices)
+            kernel[ky + offset][kx + offset] = valor;
+            suma += valor;
+        }
+    }
+    
+    // Normalizar el kernel para que la suma sea 1.0
+    // Esto garantiza que el brillo promedio de la imagen no cambie
+    if (suma > 0.0f) {
+        for (int i = 0; i < tamKernel; i++) {
+            for (int j = 0; j < tamKernel; j++) {
+                kernel[i][j] /= suma;
+            }
+        }
+    }
+    
+    return kernel;
+}
+
 // QUÉ: Liberar memoria asignada para la imagen.
 // CÓMO: Libera cada fila y canal de la matriz 3D, luego el arreglo de filas y
 // reinicia la estructura.

@@ -1,0 +1,548 @@
+---
+description: "Reglas de programacion para Parcial2_sistemasoperativos"
+alwaysApply: true
+---
+# Reglas de Programación - Procesamiento de Imágenes en C
+
+## 🎯 OBJETIVO DEL PROYECTO
+Extender un programa base de procesamiento de imágenes en C manteniendo:
+- Simplicidad educativa para principiantes
+- Robustez en manejo de memoria
+- Concurrencia con pthreads
+- Compatibilidad con imágenes grayscale (1 canal) y RGB (3 canales)
+
+---
+
+## 🔒 REGLAS INMUTABLES
+
+### 1. NO MODIFICAR CÓDIGO BASE
+- **NUNCA** alteres las funciones existentes: cargarImagen(), liberarImagen(), 
+  mostrarMatriz(), guardarPNG(), ajustarBrilloConcurrente()
+- **EXCEPCIÓN**: Solo modifica main() y mostrarMenu() para agregar opciones
+- Usa las funciones base como referencia de estilo y estructura
+
+### 2. ESTRUCTURA DE DATOS OBLIGATORIA
+```c
+typedef struct {
+    int ancho;
+    int alto;
+    int canales;                    // SIEMPRE 1 o 3
+    unsigned char*** pixeles;       // Matriz 3D: [alto][ancho][canales]
+} ImagenInfo;
+
+NUNCA uses arreglos 1D para píxeles
+SIEMPRE usa matriz 3D con notación pixeles[y][x][c]
+SIEMPRE verifica info->pixeles != NULL antes de procesar
+
+3. SOPORTE DUAL DE FORMATOS
+Todas las funciones nuevas DEBEN:
+
+✅ Funcionar con grayscale (canales = 1)
+✅ Funcionar con RGB (canales = 3)
+✅ Iterar sobre canales con for (int c = 0; c < info->canales; c++)
+❌ NUNCA asumir un número fijo de canales
+
+
+🧵 CONCURRENCIA OBLIGATORIA
+4. IMPLEMENTACIÓN DE HILOS
+Todas las funciones nuevas DEBEN usar pthreads:
+c// Estructura de argumentos (ejemplo)
+typedef struct {
+    unsigned char*** pixeles;       // O puntero a matriz origen/destino
+    int inicio;                     // Fila inicial (inclusiva)
+    int fin;                        // Fila final (exclusiva)
+    int ancho;
+    int canales;
+    // ... otros parámetros específicos
+} TuFuncionArgs;
+
+// Función del hilo
+void* tuFuncionHilo(void* args) {
+    TuFuncionArgs* tArgs = (TuFuncionArgs*)args;
+    // Procesar desde tArgs->inicio hasta tArgs->fin
+    return NULL;
+}
+
+// Función principal concurrente
+void tuFuncionConcurrente(ImagenInfo* info, /* otros params */) {
+    const int numHilos = 2;  // Mínimo 2, idealmente 2-4
+    pthread_t hilos[numHilos];
+    TuFuncionArgs args[numHilos];
+    
+    int filasPorHilo = (int)ceil((double)info->alto / numHilos);
+    
+    for (int i = 0; i < numHilos; i++) {
+        args[i].inicio = i * filasPorHilo;
+        args[i].fin = ((i + 1) * filasPorHilo < info->alto) 
+                      ? (i + 1) * filasPorHilo 
+                      : info->alto;
+        // Configurar otros campos...
+        
+        if (pthread_create(&hilos[i], NULL, tuFuncionHilo, &args[i]) != 0) {
+            fprintf(stderr, "Error al crear hilo %d\n", i);
+            return;
+        }
+    }
+    
+    for (int i = 0; i < numHilos; i++) {
+        pthread_join(hilos[i], NULL);
+    }
+}
+REQUISITOS:
+
+✅ División de trabajo por filas (más simple para principiantes)
+✅ Mínimo 2 hilos, recomendado 2-4
+✅ Manejo de errores en pthread_create()
+✅ Sincronización con pthread_join()
+❌ NO usar mutex (diseña para evitar race conditions)
+❌ NO usar variables globales compartidas escritas
+
+
+💾 GESTIÓN DE MEMORIA CRÍTICA
+5. ASIGNACIÓN Y LIBERACIÓN
+c// ASIGNACIÓN de matriz 3D (patrón obligatorio)
+unsigned char*** asignarMatriz3D(int alto, int ancho, int canales) {
+    unsigned char*** matriz = malloc(alto * sizeof(unsigned char**));
+    if (!matriz) return NULL;
+    
+    for (int y = 0; y < alto; y++) {
+        matriz[y] = malloc(ancho * sizeof(unsigned char*));
+        if (!matriz[y]) {
+            // Liberar filas ya asignadas
+            for (int yy = 0; yy < y; yy++) {
+                for (int x = 0; x < ancho; x++) free(matriz[yy][x]);
+                free(matriz[yy]);
+            }
+            free(matriz);
+            return NULL;
+        }
+        
+        for (int x = 0; x < ancho; x++) {
+            matriz[y][x] = malloc(canales * sizeof(unsigned char));
+            if (!matriz[y][x]) {
+                // Liberar píxeles de esta fila
+                for (int xx = 0; xx < x; xx++) free(matriz[y][xx]);
+                free(matriz[y]);
+                // Liberar filas anteriores
+                for (int yy = 0; yy < y; yy++) {
+                    for (int xx = 0; xx < ancho; xx++) free(matriz[yy][xx]);
+                    free(matriz[yy]);
+                }
+                free(matriz);
+                return NULL;
+            }
+        }
+    }
+    return matriz;
+}
+
+// LIBERACIÓN de matriz 3D (patrón obligatorio)
+void liberarMatriz3D(unsigned char*** matriz, int alto, int ancho) {
+    if (!matriz) return;
+    for (int y = 0; y < alto; y++) {
+        if (matriz[y]) {
+            for (int x = 0; x < ancho; x++) {
+                free(matriz[y][x]);
+            }
+            free(matriz[y]);
+        }
+    }
+    free(matriz);
+}
+REGLAS:
+
+✅ SIEMPRE verifica retorno de malloc() antes de usar
+✅ SIEMPRE libera en orden inverso: canales → columnas → filas
+✅ Para funciones que crean nueva matriz: libera la antigua con liberarImagen()
+✅ Actualiza info->pixeles, info->ancho, info->alto después de reemplazar
+❌ NUNCA dejes memoria sin liberar
+❌ NUNCA uses memoria después de free()
+
+6. FLUJO DE MEMORIA EN FUNCIONES
+cvoid tuFuncionQueModificaTamaño(ImagenInfo* info, /* params */) {
+    // 1. Crear nueva matriz
+    unsigned char*** nueva = asignarMatriz3D(nuevoAlto, nuevoAncho, info->canales);
+    if (!nueva) {
+        fprintf(stderr, "Error de memoria\n");
+        return;
+    }
+    
+    // 2. Procesar (con hilos) usando info->pixeles (origen) y nueva (destino)
+    // ...
+    
+    // 3. Liberar matriz original
+    liberarMatriz3D(info->pixeles, info->alto, info->ancho);
+    
+    // 4. Actualizar estructura
+    info->pixeles = nueva;
+    info->ancho = nuevoAncho;
+    info->alto = nuevoAlto;
+    // info->canales se mantiene o actualiza según función
+}
+
+🧮 OPERACIONES MATRICIALES
+7. ACCESO A PÍXELES
+c// CORRECTO: Notación clara y segura
+unsigned char valor = info->pixeles[y][x][c];
+
+// Para operaciones, siempre verifica límites
+if (y >= 0 && y < info->alto && x >= 0 && x < info->ancho) {
+    unsigned char valor = info->pixeles[y][x][c];
+}
+8. CONVOLUCIÓN (Reglas específicas)
+c// Kernel: matriz 2D, tamaño impar (3x3, 5x5)
+float** kernel = malloc(tamKernel * sizeof(float*));
+for (int i = 0; i < tamKernel; i++) {
+    kernel[i] = malloc(tamKernel * sizeof(float));
+}
+
+// Aplicación:
+int offset = tamKernel / 2;
+for (int y = 0; y < alto; y++) {
+    for (int x = 0; x < ancho; x++) {
+        for (int c = 0; c < canales; c++) {
+            float suma = 0.0f;
+            for (int ky = -offset; ky <= offset; ky++) {
+                for (int kx = -offset; kx <= offset; kx++) {
+                    int ny = y + ky;
+                    int nx = x + kx;
+                    
+                    // MANEJO DE BORDES: Replicar píxeles
+                    if (ny < 0) ny = 0;
+                    if (ny >= alto) ny = alto - 1;
+                    if (nx < 0) nx = 0;
+                    if (nx >= ancho) nx = ancho - 1;
+                    
+                    suma += pixeles[ny][nx][c] * kernel[ky+offset][kx+offset];
+                }
+            }
+            // Clamp a 0-255
+            int resultado = (int)(suma + 0.5f);  // Redondeo
+            pixelesDestino[y][x][c] = (resultado < 0) ? 0 : 
+                                      (resultado > 255) ? 255 : resultado;
+        }
+    }
+}
+
+// Liberar kernel
+for (int i = 0; i < tamKernel; i++) free(kernel[i]);
+free(kernel);
+REQUISITOS:
+
+✅ Kernel normalizado (suma = 1.0 para blur, puede variar para edge detection)
+✅ Bordes: replicar píxeles de borde (no zero-padding)
+✅ Clamp resultado a [0, 255]
+✅ Procesar cada canal independientemente
+
+9. INTERPOLACIÓN BILINEAL
+c// Para coordenadas fraccionarias (x', y') en imagen origen
+unsigned char interpolar(unsigned char*** img, float x, float y, int c, 
+                        int ancho, int alto) {
+    int x0 = (int)floor(x);
+    int y0 = (int)floor(y);
+    int x1 = x0 + 1;
+    int y1 = y0 + 1;
+    
+    // Clamp a límites
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= ancho) x1 = ancho - 1;
+    if (y1 >= alto) y1 = alto - 1;
+    
+    float a = x - x0;  // Parte fraccionaria
+    float b = y - y0;
+    
+    float v00 = img[y0][x0][c];
+    float v10 = img[y0][x1][c];
+    float v01 = img[y1][x0][c];
+    float v11 = img[y1][x1][c];
+    
+    float resultado = (1-a)*(1-b)*v00 + a*(1-b)*v10 + (1-a)*b*v01 + a*b*v11;
+    return (unsigned char)(resultado + 0.5f);  // Redondeo
+}
+
+📋 INTEGRACIÓN AL MENÚ
+10. PATRÓN DE INTEGRACIÓN
+c// En mostrarMenu()
+void mostrarMenu() {
+    printf("\n--- Plataforma de Edición de Imágenes ---\n");
+    printf("1. Cargar imagen PNG\n");
+    printf("2. Mostrar matriz de píxeles\n");
+    printf("3. Guardar como PNG\n");
+    printf("4. Ajustar brillo (+/- valor) concurrentemente\n");
+    printf("5. [TU NUEVA FUNCIÓN]\n");  // <-- Agregar aquí
+    // ...
+    printf("N. Salir\n");  // <-- Última opción
+    printf("Opción: ");
+}
+
+// En main(), dentro del switch
+case 5: {  // Tu nueva función
+    // 1. Validar imagen cargada
+    if (!imagen.pixeles) {
+        printf("Primero carga una imagen (opción 1).\n");
+        break;
+    }
+    
+    // 2. Solicitar parámetros
+    int param1;
+    printf("Ingresa parámetro 1: ");
+    if (scanf("%d", &param1) != 1) {
+        while (getchar() != '\n');
+        printf("Entrada inválida.\n");
+        break;
+    }
+    while (getchar() != '\n');  // Limpiar buffer
+    
+    // 3. Validar parámetros
+    if (param1 <= 0) {
+        printf("Parámetro inválido.\n");
+        break;
+    }
+    
+    // 4. Llamar función
+    tuFuncionConcurrente(&imagen, param1);
+    break;
+}
+REQUISITOS:
+
+✅ Validar imagen.pixeles != NULL antes de procesar
+✅ Limpiar buffer con while(getchar() != '\n') después de scanf()
+✅ Validar parámetros antes de llamar función
+✅ Mostrar mensajes informativos (dimensiones, formato, éxito)
+✅ "Salir" SIEMPRE es la última opción
+
+
+✅ VALIDACIÓN Y ERRORES
+11. MANEJO DE ERRORES OBLIGATORIO
+c// SIEMPRE verifica:
+if (!info || !info->pixeles) {
+    fprintf(stderr, "Error: No hay imagen cargada\n");
+    return;
+}
+
+if (malloc_result == NULL) {
+    fprintf(stderr, "Error: Memoria insuficiente\n");
+    // Liberar memoria ya asignada
+    return;
+}
+
+if (pthread_create(...) != 0) {
+    fprintf(stderr, "Error al crear hilo %d\n", i);
+    // Cancelar hilos ya creados o manejar error
+    return;
+}
+12. MENSAJES AL USUARIO
+c// BUENOS mensajes (informativos, no técnicos)
+printf("Imagen cargada: %dx%d, %d canales (%s)\n", 
+       info->ancho, info->alto, info->canales,
+       info->canales == 1 ? "grises" : "RGB");
+
+printf("Aplicando desenfoque con kernel %dx%d, sigma=%.2f...\n", 
+       tamKernel, tamKernel, sigma);
+
+printf("Rotación completada. Nuevas dimensiones: %dx%d\n", 
+       info->ancho, info->alto);
+
+// MALOS mensajes (evitar)
+printf("malloc failed\n");  // Demasiado técnico
+printf("Done\n");            // Poco informativo
+
+🔧 COMPILACIÓN Y DEPENDENCIAS
+13. COMPILACIÓN OBLIGATORIA
+bash# Comando estándar
+gcc -o img img_base.c -pthread -lm
+
+# Con warnings (recomendado para desarrollo)
+gcc -o img img_base.c -pthread -lm -Wall -Wextra
+
+# Con optimización (opcional)
+gcc -o img img_base.c -pthread -lm -O2
+REQUISITOS:
+
+✅ -pthread: Soporte para pthreads
+✅ -lm: Librería matemática (sin, cos, sqrt, etc.)
+✅ Debe compilar sin warnings en gcc/clang
+
+14. DEPENDENCIAS PERMITIDAS
+c// PERMITIDAS (ya en el código base)
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <string.h>
+#include <math.h>
+#include "stb_image.h"
+#include "stb_image_write.h"
+
+// PROHIBIDAS (no agregar)
+#include <opencv2/...>    // ❌
+#include <pthread_np.h>   // ❌ (no portable)
+#include <omp.h>          // ❌ (usar pthreads)
+
+📝 ESTILO Y DOCUMENTACIÓN
+15. COMENTARIOS QUÉ/CÓMO/POR QUÉ
+c// QUÉ: Aplica desenfoque Gaussiano mediante convolución.
+// CÓMO: Genera kernel, divide trabajo entre hilos, interpola bordes.
+// POR QUÉ: Suaviza la imagen para reducir ruido o preparar para otras operaciones.
+void aplicarConvolucionConcurrente(ImagenInfo* info, int tamKernel, float sigma) {
+    // Implementación...
+}
+REQUISITOS:
+
+✅ Documentar todas las funciones nuevas con QUÉ/CÓMO/POR QUÉ
+✅ Comentar bloques complejos (algoritmos, cálculos matemáticos)
+✅ Usar nombres descriptivos en español (consistente con código base)
+❌ NO comentar obviedades (i++; // incrementar i)
+
+16. NOMENCLATURA
+c// Variables: camelCase
+int nuevoAncho, filasPorHilo, numHilos;
+
+// Funciones: camelCase, sufijo "Concurrente" si usa hilos
+void aplicarConvolucionConcurrente(...);
+void rotarImagenConcurrente(...);
+
+// Estructuras: PascalCase con sufijo "Args" para argumentos de hilos
+typedef struct {
+    ...
+} ConvolucionArgs;
+
+// Constantes: MAYUSCULAS_CON_GUION
+#define MAX_HILOS 8
+
+🧪 TESTING Y CALIDAD
+17. PRUEBAS OBLIGATORIAS
+Antes de considerar completada una función:
+bash# 1. Compilación sin warnings
+gcc -o img img_base.c -pthread -lm -Wall -Wextra
+
+# 2. Probar con imagen grayscale
+./img imagen_gris.png
+
+# 3. Probar con imagen RGB
+./img imagen_rgb.png
+
+# 4. Verificar memory leaks (si tienes valgrind)
+valgrind --leak-check=full ./img imagen.png
+
+# 5. Probar casos límite
+# - Imágenes pequeñas (1x1, 10x10)
+# - Imágenes grandes (1000x1000+)
+# - Parámetros inválidos (0, negativos)
+18. CHECKLIST POR FUNCIÓN
+
+ Compila sin warnings
+ Funciona con grayscale (1 canal)
+ Funciona con RGB (3 canales)
+ Usa 2+ hilos correctamente
+ Sin memory leaks (verificado con valgrind o manualmente)
+ Valida parámetros de entrada
+ Maneja errores de memoria
+ Mensajes informativos al usuario
+ Documentación QUÉ/CÓMO/POR QUÉ
+ Integrada al menú correctamente
+
+
+🚫 PROHIBICIONES ABSOLUTAS
+19. NO HACER BAJO NINGUNA CIRCUNSTANCIA
+❌ Modificar ImagenInfo (estructura base)
+❌ Cambiar firma de funciones base
+❌ Usar arreglos 1D para píxeles
+❌ Asumir canales = 3 siempre
+❌ Crear variables globales modificables
+❌ Usar goto
+❌ Ignorar retornos de malloc(), pthread_create()
+❌ Dejar memoria sin liberar
+❌ Compilar con warnings
+❌ Agregar dependencias externas (excepto stb)
+
+📐 FUNCIONES REQUERIDAS (Resumen)
+20. ESPECIFICACIONES MÍNIMAS
+Función 1: Convolución (Desenfoque Gaussiano)
+cvoid aplicarConvolucionConcurrente(ImagenInfo* info, int tamKernel, float sigma);
+
+Genera kernel Gaussiano: G(x,y) = (1/(2πσ²)) * e^(-(x²+y²)/(2σ²))
+Normaliza kernel
+Maneja bordes por replicación
+2-4 hilos por filas
+
+Función 2: Rotación
+cvoid rotarImagenConcurrente(ImagenInfo* info, float angulo);
+
+Ángulo en grados, convierte a radianes
+Matriz de rotación + interpolación bilineal
+Crea nueva matriz con nuevas dimensiones
+2-4 hilos por filas del destino
+
+Función 3: Detección de Bordes (Sobel)
+cvoid detectarBordesConcurrente(ImagenInfo* info);
+
+Kernels Sobel X e Y predefinidos
+Magnitud: sqrt(Gx² + Gy²)
+Convierte RGB a grayscale si necesario
+Resultado siempre grayscale (1 canal)
+2-4 hilos por filas
+
+Función 4: Escalado (Resize)
+cvoid escalarImagenConcurrente(ImagenInfo* info, int nuevoAncho, int nuevoAlto);
+
+Interpolación bilineal
+Factores de escala: ancho_orig / nuevo_ancho
+Crea nueva matriz
+2-4 hilos por filas del destino
+
+
+🎓 FILOSOFÍA DEL PROYECTO
+21. PRINCIPIOS GUÍA
+
+Simplicidad sobre optimización: Código claro para principiantes
+Robustez sobre velocidad: Validar todo, manejar errores
+Educación sobre producción: Comentarios extensos, estructura clara
+Consistencia sobre innovación: Seguir patrones del código base
+Seguridad sobre conveniencia: Liberar memoria, verificar límites
+
+
+✨ BONUS: MEJORAS OPCIONALES
+22. MEJORAS POST-IMPLEMENTACIÓN (No obligatorias)
+
+Número de hilos configurable por usuario
+Timer para medir rendimiento (clock_gettime())
+Barra de progreso para operaciones largas
+Histograma de píxeles
+Conversión de formatos (RGB ↔ grayscale como opción)
+Filtros adicionales (sharpen, emboss, median)
+
+
+📞 AYUDA Y RECURSOS
+23. CUANDO TENGAS DUDAS
+
+Revisa ajustarBrilloConcurrente() como referencia
+Compila frecuentemente para detectar errores temprano
+Prueba con imágenes pequeñas primero (10x10)
+Usa printf() debug para verificar valores
+Valgrind es tu amigo para memory leaks
+
+24. COMANDOS ÚTILES
+bash# Crear imagen de prueba pequeña (con ImageMagick)
+convert -size 10x10 xc:gray50 test_gray.png
+convert -size 10x10 plasma: test_rgb.png
+
+# Verificar formato de imagen
+file imagen.png
+
+# Debugging con gdb
+gcc -g -o img img_base.c -pthread -lm
+gdb ./img
+
+✅ CHECKLIST FINAL
+Antes de considerar el proyecto completo:
+
+ 4 funciones nuevas implementadas y probadas
+ Todas usan concurrencia (2+ hilos)
+ Funcionan con grayscale Y RGB
+ Integradas al menú correctamente
+ Compila sin warnings
+ Sin memory leaks
+ Documentación QUÉ/CÓMO/POR QUÉ completa
+ Probadas con imágenes reales
+ README.md con instrucciones

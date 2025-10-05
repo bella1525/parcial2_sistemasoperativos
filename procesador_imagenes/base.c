@@ -301,6 +301,161 @@ float** generarKernelGaussiano(int tamKernel, float sigma) {
     return kernel;
 }
 
+// QUÉ: Aplica convolución en un rango de filas (para hilos).
+// CÓMO: Para cada píxel en el rango, aplica el kernel mediante suma ponderada
+// de los píxeles vecinos. Usa clamping de coordenadas para replicar bordes.
+// Clamp el resultado final a [0, 255]. Procesa cada canal independientemente.
+// POR QUÉ: Permite procesar la imagen en paralelo dividiendo filas entre hilos,
+// mejorando el rendimiento en sistemas multi-core.
+void* aplicarConvolucionHilo(void* args) {
+    ConvolucionArgs* cArgs = (ConvolucionArgs*)args;
+    
+    // Calcular el offset desde el centro del kernel
+    int offset = cArgs->tamKernel / 2;
+    
+    // Procesar cada fila asignada a este hilo
+    for (int y = cArgs->inicio; y < cArgs->fin; y++) {
+        for (int x = 0; x < cArgs->ancho; x++) {
+            // Procesar cada canal del píxel independientemente
+            for (int c = 0; c < cArgs->canales; c++) {
+                float suma = 0.0f;
+                
+                // Aplicar convolución: sumar píxeles vecinos ponderados por kernel
+                for (int ky = -offset; ky <= offset; ky++) {
+                    for (int kx = -offset; kx <= offset; kx++) {
+                        // Calcular coordenadas del píxel vecino
+                        int ny = y + ky;
+                        int nx = x + kx;
+                        
+                        // Manejo de bordes: replicar píxeles de borde (clamping)
+                        // Esto evita artefactos negros en los bordes
+                        if (ny < 0) ny = 0;
+                        if (ny >= cArgs->alto) ny = cArgs->alto - 1;
+                        if (nx < 0) nx = 0;
+                        if (nx >= cArgs->ancho) nx = cArgs->ancho - 1;
+                        
+                        // Acumular: valor_pixel * peso_kernel
+                        suma += cArgs->pixelesOrigen[ny][nx][c] * 
+                                cArgs->kernel[ky + offset][kx + offset];
+                    }
+                }
+                
+                // Redondear y clamp resultado a rango válido [0, 255]
+                int resultado = (int)(suma + 0.5f);  // Redondeo
+                if (resultado < 0) resultado = 0;
+                if (resultado > 255) resultado = 255;
+                
+                // Asignar resultado a matriz destino
+                cArgs->pixelesDestino[y][x][c] = (unsigned char)resultado;
+            }
+        }
+    }
+    
+    return NULL;
+}
+
+// QUÉ: Aplica desenfoque Gaussiano mediante convolución concurrente.
+// CÓMO: Genera kernel Gaussiano, crea matriz temporal para resultados, divide
+// trabajo entre 2 hilos por filas, espera sincronización, reemplaza matriz original.
+// POR QUÉ: Suaviza la imagen para reducir ruido. Usa concurrencia para acelerar
+// el procesamiento en imágenes grandes.
+void aplicarConvolucionConcurrente(ImagenInfo* info, int tamKernel, float sigma) {
+    // Validar que hay imagen cargada
+    if (!info || !info->pixeles) {
+        fprintf(stderr, "Error: No hay imagen cargada para aplicar convolución\n");
+        return;
+    }
+    
+    // Validar tamaño del kernel (debe ser impar y positivo)
+    if (tamKernel <= 0 || tamKernel % 2 == 0) {
+        fprintf(stderr, "Error: El tamaño del kernel debe ser impar y positivo (recibido: %d)\n", 
+                tamKernel);
+        return;
+    }
+    
+    // Validar sigma (debe ser positivo)
+    if (sigma <= 0.0f) {
+        fprintf(stderr, "Error: Sigma debe ser positivo (recibido: %.2f)\n", sigma);
+        return;
+    }
+    
+    printf("Generando kernel Gaussiano %dx%d con sigma=%.2f...\n", 
+           tamKernel, tamKernel, sigma);
+    
+    // Generar kernel Gaussiano
+    float** kernel = generarKernelGaussiano(tamKernel, sigma);
+    if (!kernel) {
+        fprintf(stderr, "Error: No se pudo generar el kernel Gaussiano\n");
+        return;
+    }
+    
+    printf("Aplicando convolución a imagen %dx%d, %d canales...\n", 
+           info->ancho, info->alto, info->canales);
+    
+    // Crear matriz temporal para almacenar resultados
+    unsigned char*** matrizTemporal = asignarMatriz3D(info->alto, info->ancho, info->canales);
+    if (!matrizTemporal) {
+        fprintf(stderr, "Error: No se pudo asignar memoria para matriz temporal\n");
+        // Liberar kernel antes de retornar
+        for (int i = 0; i < tamKernel; i++) {
+            free(kernel[i]);
+        }
+        free(kernel);
+        return;
+    }
+    
+    // Configurar hilos para procesamiento paralelo
+    const int numHilos = 2;  // Número fijo de hilos para simplicidad
+    pthread_t hilos[numHilos];
+    ConvolucionArgs args[numHilos];
+    int filasPorHilo = (int)ceil((double)info->alto / numHilos);
+    
+    // Configurar y lanzar hilos
+    for (int i = 0; i < numHilos; i++) {
+        args[i].pixelesOrigen = info->pixeles;
+        args[i].pixelesDestino = matrizTemporal;
+        args[i].kernel = kernel;
+        args[i].tamKernel = tamKernel;
+        args[i].inicio = i * filasPorHilo;
+        args[i].fin = ((i + 1) * filasPorHilo < info->alto) 
+                      ? (i + 1) * filasPorHilo 
+                      : info->alto;
+        args[i].ancho = info->ancho;
+        args[i].alto = info->alto;
+        args[i].canales = info->canales;
+        
+        if (pthread_create(&hilos[i], NULL, aplicarConvolucionHilo, &args[i]) != 0) {
+            fprintf(stderr, "Error al crear hilo %d para convolución\n", i);
+            // Liberar recursos
+            liberarMatriz3D(matrizTemporal, info->alto, info->ancho);
+            for (int j = 0; j < tamKernel; j++) {
+                free(kernel[j]);
+            }
+            free(kernel);
+            return;
+        }
+    }
+    
+    // Esperar a que todos los hilos terminen
+    for (int i = 0; i < numHilos; i++) {
+        pthread_join(hilos[i], NULL);
+    }
+    
+    // Liberar el kernel (ya no se necesita)
+    for (int i = 0; i < tamKernel; i++) {
+        free(kernel[i]);
+    }
+    free(kernel);
+    
+    // Liberar matriz original y reemplazar con la nueva
+    liberarMatriz3D(info->pixeles, info->alto, info->ancho);
+    info->pixeles = matrizTemporal;
+    
+    printf("Convolución aplicada con kernel %dx%d, sigma=%.2f (%s)\n", 
+           tamKernel, tamKernel, sigma,
+           info->canales == 1 ? "grises" : "RGB");
+}
+
 // QUÉ: Liberar memoria asignada para la imagen.
 // CÓMO: Libera cada fila y canal de la matriz 3D, luego el arreglo de filas y
 // reinicia la estructura.
@@ -453,6 +608,22 @@ typedef struct {
     int canales;
     int delta;
 } BrilloArgs;
+
+// QUÉ: Estructura para pasar datos al hilo de convolución.
+// CÓMO: Contiene matrices origen y destino, kernel, rango de filas y dimensiones.
+// POR QUÉ: Los hilos necesitan datos específicos para procesar convolución en paralelo,
+// incluyendo acceso al kernel y matrices separadas para lectura y escritura.
+typedef struct {
+    unsigned char*** pixelesOrigen;   // Matriz de lectura (imagen original)
+    unsigned char*** pixelesDestino;  // Matriz de escritura (resultado)
+    float** kernel;                   // Kernel de convolución
+    int tamKernel;                    // Tamaño del kernel (debe ser impar)
+    int inicio;                       // Fila inicial (inclusiva)
+    int fin;                          // Fila final (exclusiva)
+    int ancho;                        // Ancho de la imagen
+    int alto;                         // Alto de la imagen
+    int canales;                      // Número de canales (1 o 3)
+} ConvolucionArgs;
 
 // QUÉ: Ajustar brillo en un rango de filas (para hilos).
 // CÓMO: Suma delta a cada canal de cada píxel, con clamp entre 0-255.

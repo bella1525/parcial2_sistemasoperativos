@@ -301,6 +301,39 @@ float** generarKernelGaussiano(int tamKernel, float sigma) {
     return kernel;
 }
 
+// QUÉ: Estructura para pasar datos al hilo de convolución.
+// CÓMO: Contiene matrices origen y destino, kernel, rango de filas y dimensiones.
+// POR QUÉ: Los hilos necesitan datos específicos para procesar convolución en paralelo,
+// incluyendo acceso al kernel y matrices separadas para lectura y escritura.
+typedef struct {
+    unsigned char*** pixelesOrigen;   // Matriz de lectura (imagen original)
+    unsigned char*** pixelesDestino;  // Matriz de escritura (resultado)
+    float** kernel;                   // Kernel de convolución
+    int tamKernel;                    // Tamaño del kernel (debe ser impar)
+    int inicio;                       // Fila inicial (inclusiva)
+    int fin;                          // Fila final (exclusiva)
+    int ancho;                        // Ancho de la imagen
+    int alto;                         // Alto de la imagen
+    int canales;                      // Número de canales (1 o 3)
+} ConvolucionArgs;
+
+// QUÉ: Estructura para pasar datos al hilo de escalado.
+// CÓMO: Contiene matrices origen y destino, dimensiones originales y destino,
+// y el rango de filas a procesar en la imagen destino.
+// POR QUÉ: Los hilos necesitan los factores de escala implícitos en las dimensiones
+// para mapear cada píxel destino a su posición en la imagen origen.
+typedef struct {
+    unsigned char*** pixelesOrigen;   // Matriz de lectura (imagen original)
+    unsigned char*** pixelesDestino;  // Matriz de escritura (imagen escalada)
+    int anchoOrigen;                  // Ancho de la imagen original
+    int altoOrigen;                   // Alto de la imagen original
+    int anchoDestino;                 // Ancho de la imagen escalada
+    int altoDestino;                  // Alto de la imagen escalada
+    int canales;                      // Número de canales (1 o 3)
+    int inicio;                       // Fila inicial en imagen destino (inclusiva)
+    int fin;                          // Fila final en imagen destino (exclusiva)
+} EscaladoArgs;
+
 // QUÉ: Aplica convolución en un rango de filas (para hilos).
 // CÓMO: Para cada píxel en el rango, aplica el kernel mediante suma ponderada
 // de los píxeles vecinos. Usa clamping de coordenadas para replicar bordes.
@@ -453,6 +486,131 @@ void aplicarConvolucionConcurrente(ImagenInfo* info, int tamKernel, float sigma)
     
     printf("Convolución aplicada con kernel %dx%d, sigma=%.2f (%s)\n", 
            tamKernel, tamKernel, sigma,
+           info->canales == 1 ? "grises" : "RGB");
+}
+
+// QUÉ: Escala (redimensiona) una imagen en un rango de filas (para hilos).
+// CÓMO: Para cada píxel en la imagen destino, calcula su posición correspondiente
+// en la imagen origen usando factores de escala (scaleX, scaleY). Como las
+// coordenadas resultantes son fraccionarias, usa interpolación bilineal para
+// obtener valores suaves. Procesa cada canal independientemente.
+// POR QUÉ: La interpolación bilineal evita aliasing (efecto pixelado o escalera)
+// que ocurre con nearest-neighbor, produciendo imágenes escaladas de mayor calidad.
+// El procesamiento por hilos acelera operaciones en imágenes grandes.
+void* escalarImagenHilo(void* args) {
+    EscaladoArgs* eArgs = (EscaladoArgs*)args;
+    
+    // Calcular factores de escala (mapeo destino → origen)
+    // Si anchoDestino < anchoOrigen: upscale (ampliar)
+    // Si anchoDestino > anchoOrigen: downscale (reducir)
+    float scaleX = (float)eArgs->anchoOrigen / eArgs->anchoDestino;
+    float scaleY = (float)eArgs->altoOrigen / eArgs->altoDestino;
+    
+    // Procesar cada fila asignada a este hilo en la imagen DESTINO
+    for (int y = eArgs->inicio; y < eArgs->fin; y++) {
+        for (int x = 0; x < eArgs->anchoDestino; x++) {
+            // Calcular coordenadas correspondientes en imagen ORIGEN
+            // Estas coordenadas son fraccionarias (float), no enteras
+            float xOrig = x * scaleX;
+            float yOrig = y * scaleY;
+            
+            // Procesar cada canal del píxel
+            for (int c = 0; c < eArgs->canales; c++) {
+                // Usar interpolación bilineal para obtener valor suave
+                // Esto considera los 4 píxeles vecinos más cercanos en la imagen origen
+                unsigned char valorInterpolado = interpolacionBilineal(
+                    eArgs->pixelesOrigen,
+                    xOrig,
+                    yOrig,
+                    c,
+                    eArgs->anchoOrigen,
+                    eArgs->altoOrigen
+                );
+                
+                // Asignar valor interpolado al píxel destino
+                eArgs->pixelesDestino[y][x][c] = valorInterpolado;
+            }
+        }
+    }
+    
+    return NULL;
+}
+
+// QUÉ: Escala (redimensiona) una imagen a nuevas dimensiones usando concurrencia.
+// CÓMO: Crea matriz con nuevas dimensiones, divide filas entre 2 hilos, cada hilo
+// mapea píxeles destino a origen con interpolación bilineal, sincroniza, y reemplaza
+// la imagen original actualizando dimensiones en la estructura.
+// POR QUÉ: Permite cambiar el tamaño de imágenes (ampliar o reducir) manteniendo
+// calidad visual mediante interpolación. La concurrencia acelera el procesamiento.
+void escalarImagenConcurrente(ImagenInfo* info, int nuevoAncho, int nuevoAlto) {
+    // Validar que hay imagen cargada
+    if (!info || !info->pixeles) {
+        fprintf(stderr, "Error: No hay imagen cargada para escalar\n");
+        return;
+    }
+    
+    // Validar nuevas dimensiones (deben ser positivas)
+    if (nuevoAncho <= 0 || nuevoAlto <= 0) {
+        fprintf(stderr, "Error: Las nuevas dimensiones deben ser positivas (recibido: %dx%d)\n",
+                nuevoAncho, nuevoAlto);
+        return;
+    }
+    
+    // Mensaje informativo sobre la operación
+    printf("Escalando imagen de %dx%d a %dx%d...\n", 
+           info->ancho, info->alto, nuevoAncho, nuevoAlto);
+    
+    // Crear nueva matriz con las dimensiones destino
+    unsigned char*** nueva = asignarMatriz3D(nuevoAlto, nuevoAncho, info->canales);
+    if (!nueva) {
+        fprintf(stderr, "Error: No se pudo asignar memoria para imagen escalada\n");
+        return;
+    }
+    
+    // Configurar hilos para procesamiento paralelo
+    const int numHilos = 2;  // Número fijo de hilos para simplicidad
+    pthread_t hilos[numHilos];
+    EscaladoArgs args[numHilos];
+    int filasPorHilo = (int)ceil((double)nuevoAlto / numHilos);
+    
+    // Configurar y lanzar hilos
+    for (int i = 0; i < numHilos; i++) {
+        args[i].pixelesOrigen = info->pixeles;
+        args[i].pixelesDestino = nueva;
+        args[i].anchoOrigen = info->ancho;
+        args[i].altoOrigen = info->alto;
+        args[i].anchoDestino = nuevoAncho;
+        args[i].altoDestino = nuevoAlto;
+        args[i].canales = info->canales;
+        args[i].inicio = i * filasPorHilo;
+        args[i].fin = ((i + 1) * filasPorHilo < nuevoAlto) 
+                      ? (i + 1) * filasPorHilo 
+                      : nuevoAlto;
+        
+        if (pthread_create(&hilos[i], NULL, escalarImagenHilo, &args[i]) != 0) {
+            fprintf(stderr, "Error al crear hilo %d para escalado\n", i);
+            // Liberar recursos
+            liberarMatriz3D(nueva, nuevoAlto, nuevoAncho);
+            return;
+        }
+    }
+    
+    // Esperar a que todos los hilos terminen
+    for (int i = 0; i < numHilos; i++) {
+        pthread_join(hilos[i], NULL);
+    }
+    
+    // Liberar matriz original y reemplazar con la nueva
+    liberarMatriz3D(info->pixeles, info->alto, info->ancho);
+    info->pixeles = nueva;
+    
+    // Actualizar dimensiones en la estructura
+    info->ancho = nuevoAncho;
+    info->alto = nuevoAlto;
+    // info->canales se mantiene sin cambios
+    
+    printf("Escalado completado. Nuevas dimensiones: %dx%d (%s)\n",
+           nuevoAncho, nuevoAlto,
            info->canales == 1 ? "grises" : "RGB");
 }
 
@@ -609,22 +767,6 @@ typedef struct {
     int delta;
 } BrilloArgs;
 
-// QUÉ: Estructura para pasar datos al hilo de convolución.
-// CÓMO: Contiene matrices origen y destino, kernel, rango de filas y dimensiones.
-// POR QUÉ: Los hilos necesitan datos específicos para procesar convolución en paralelo,
-// incluyendo acceso al kernel y matrices separadas para lectura y escritura.
-typedef struct {
-    unsigned char*** pixelesOrigen;   // Matriz de lectura (imagen original)
-    unsigned char*** pixelesDestino;  // Matriz de escritura (resultado)
-    float** kernel;                   // Kernel de convolución
-    int tamKernel;                    // Tamaño del kernel (debe ser impar)
-    int inicio;                       // Fila inicial (inclusiva)
-    int fin;                          // Fila final (exclusiva)
-    int ancho;                        // Ancho de la imagen
-    int alto;                         // Alto de la imagen
-    int canales;                      // Número de canales (1 o 3)
-} ConvolucionArgs;
-
 // QUÉ: Ajustar brillo en un rango de filas (para hilos).
 // CÓMO: Suma delta a cada canal de cada píxel, con clamp entre 0-255.
 // POR QUÉ: Procesa píxeles en paralelo para demostrar concurrencia.
@@ -691,7 +833,9 @@ void mostrarMenu() {
     printf("2. Mostrar matriz de píxeles\n");
     printf("3. Guardar como PNG\n");
     printf("4. Ajustar brillo (+/- valor) concurrentemente\n");
-    printf("5. Salir\n");
+    printf("5. Aplicar desenfoque Gaussiano (convolución)\n");
+    printf("6. Redimensionar imagen (escalar)\n");
+    printf("7. Salir\n");
     printf("Opción: ");
 }
 
@@ -765,7 +909,78 @@ int main(int argc, char* argv[]) {
                 ajustarBrilloConcurrente(&imagen, delta);
                 break;
             }
-            case 5: // Salir
+            case 5: { // Aplicar convolución
+                if (!imagen.pixeles) {
+                    printf("Primero carga una imagen (opción 1).\n");
+                    break;
+                }
+                
+                int tamKernel;
+                printf("Tamaño del kernel (3, 5, 7, etc. - debe ser impar): ");
+                if (scanf("%d", &tamKernel) != 1) {
+                    while (getchar() != '\n');
+                    printf("Entrada inválida.\n");
+                    break;
+                }
+                while (getchar() != '\n');
+                
+                if (tamKernel <= 0 || tamKernel % 2 == 0) {
+                    printf("El tamaño del kernel debe ser impar y positivo.\n");
+                    break;
+                }
+                
+                float sigma;
+                printf("Sigma para Gaussiano (recomendado 1.0-2.0): ");
+                if (scanf("%f", &sigma) != 1) {
+                    while (getchar() != '\n');
+                    printf("Entrada inválida.\n");
+                    break;
+                }
+                while (getchar() != '\n');
+                
+                if (sigma <= 0.0f) {
+                    printf("Sigma debe ser positivo.\n");
+                    break;
+                }
+                
+                aplicarConvolucionConcurrente(&imagen, tamKernel, sigma);
+                break;
+            }
+            case 6: { // Redimensionar imagen
+                if (!imagen.pixeles) {
+                    printf("Primero carga una imagen (opción 1).\n");
+                    break;
+                }
+                
+                printf("Dimensiones actuales: %dx%d\n", imagen.ancho, imagen.alto);
+                
+                int nuevoAncho;
+                printf("Nuevo ancho (píxeles): ");
+                if (scanf("%d", &nuevoAncho) != 1) {
+                    while (getchar() != '\n');
+                    printf("Entrada inválida.\n");
+                    break;
+                }
+                while (getchar() != '\n');
+                
+                int nuevoAlto;
+                printf("Nuevo alto (píxeles): ");
+                if (scanf("%d", &nuevoAlto) != 1) {
+                    while (getchar() != '\n');
+                    printf("Entrada inválida.\n");
+                    break;
+                }
+                while (getchar() != '\n');
+                
+                if (nuevoAncho <= 0 || nuevoAlto <= 0) {
+                    printf("Las dimensiones deben ser positivas.\n");
+                    break;
+                }
+                
+                escalarImagenConcurrente(&imagen, nuevoAncho, nuevoAlto);
+                break;
+            }
+            case 7: // Salir
                 liberarImagen(&imagen);
                 printf("¡Adiós!\n");
                 return EXIT_SUCCESS;

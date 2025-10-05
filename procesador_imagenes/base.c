@@ -39,6 +39,129 @@ typedef struct {
     unsigned char*** pixeles; // Matriz 3D: [alto][ancho][canales]
 } ImagenInfo;
 
+// =====================================================================
+// FUNCIONES AUXILIARES DE MANEJO DE MEMORIA
+// =====================================================================
+
+// QUÉ: Asigna memoria para una matriz 3D de píxeles (alto x ancho x canales).
+// CÓMO: Asigna en tres niveles: filas, columnas y canales por píxel. Si falla 
+// en cualquier nivel, libera toda la memoria ya asignada y retorna NULL.
+// POR QUÉ: Centraliza la asignación de matrices 3D con manejo robusto de errores,
+// evitando fugas de memoria y duplicación de código en todas las funciones.
+unsigned char*** asignarMatriz3D(int alto, int ancho, int canales) {
+    // Validar parámetros
+    if (alto <= 0 || ancho <= 0 || canales <= 0) {
+        fprintf(stderr, "Error: Parámetros inválidos para asignarMatriz3D (alto=%d, ancho=%d, canales=%d)\n",
+                alto, ancho, canales);
+        return NULL;
+    }
+
+    // Nivel 1: Asignar arreglo de filas
+    unsigned char*** matriz = malloc(alto * sizeof(unsigned char**));
+    if (!matriz) {
+        fprintf(stderr, "Error de memoria: No se pudo asignar arreglo de filas\n");
+        return NULL;
+    }
+
+    // Nivel 2: Asignar arreglo de columnas para cada fila
+    for (int y = 0; y < alto; y++) {
+        matriz[y] = malloc(ancho * sizeof(unsigned char*));
+        if (!matriz[y]) {
+            fprintf(stderr, "Error de memoria: No se pudo asignar columnas en fila %d\n", y);
+            // Liberar filas ya asignadas
+            for (int yy = 0; yy < y; yy++) {
+                for (int x = 0; x < ancho; x++) {
+                    free(matriz[yy][x]);
+                }
+                free(matriz[yy]);
+            }
+            free(matriz);
+            return NULL;
+        }
+
+        // Nivel 3: Asignar canales para cada píxel de la fila
+        for (int x = 0; x < ancho; x++) {
+            matriz[y][x] = malloc(canales * sizeof(unsigned char));
+            if (!matriz[y][x]) {
+                fprintf(stderr, "Error de memoria: No se pudo asignar canales en [%d][%d]\n", y, x);
+                // Liberar píxeles de esta fila ya asignados
+                for (int xx = 0; xx < x; xx++) {
+                    free(matriz[y][xx]);
+                }
+                free(matriz[y]);
+                // Liberar filas anteriores completamente
+                for (int yy = 0; yy < y; yy++) {
+                    for (int xx = 0; xx < ancho; xx++) {
+                        free(matriz[yy][xx]);
+                    }
+                    free(matriz[yy]);
+                }
+                free(matriz);
+                return NULL;
+            }
+        }
+    }
+
+    return matriz;
+}
+
+// QUÉ: Libera la memoria de una matriz 3D de píxeles.
+// CÓMO: Libera en orden inverso a la asignación: primero canales (píxeles), 
+// luego columnas (filas), finalmente el arreglo principal.
+// POR QUÉ: Evita fugas de memoria liberando todos los niveles de la matriz 3D
+// correctamente, con verificación de puntero nulo para robustez.
+void liberarMatriz3D(unsigned char*** matriz, int alto, int ancho) {
+    if (!matriz) {
+        return; // Seguro ante punteros nulos
+    }
+
+    for (int y = 0; y < alto; y++) {
+        if (matriz[y]) {
+            for (int x = 0; x < ancho; x++) {
+                free(matriz[y][x]); // Liberar canales de cada píxel
+            }
+            free(matriz[y]); // Liberar fila (columnas)
+        }
+    }
+    free(matriz); // Liberar arreglo principal (filas)
+}
+
+// QUÉ: Crea una copia completa (clon) de una matriz 3D de píxeles.
+// CÓMO: Asigna nueva matriz con asignarMatriz3D(), luego copia píxel por píxel
+// todos los canales desde la matriz origen.
+// POR QUÉ: Necesario para operaciones que requieren preservar la imagen original
+// mientras crean una versión modificada (filtros, transformaciones).
+unsigned char*** clonarMatriz3D(unsigned char*** origen, int alto, int ancho, int canales) {
+    // Validar parámetros
+    if (!origen) {
+        fprintf(stderr, "Error: Matriz origen es NULL en clonarMatriz3D\n");
+        return NULL;
+    }
+    if (alto <= 0 || ancho <= 0 || canales <= 0) {
+        fprintf(stderr, "Error: Parámetros inválidos para clonarMatriz3D (alto=%d, ancho=%d, canales=%d)\n",
+                alto, ancho, canales);
+        return NULL;
+    }
+
+    // Asignar nueva matriz
+    unsigned char*** clon = asignarMatriz3D(alto, ancho, canales);
+    if (!clon) {
+        fprintf(stderr, "Error: No se pudo asignar memoria para clonar matriz\n");
+        return NULL;
+    }
+
+    // Copiar píxel por píxel
+    for (int y = 0; y < alto; y++) {
+        for (int x = 0; x < ancho; x++) {
+            for (int c = 0; c < canales; c++) {
+                clon[y][x][c] = origen[y][x][c];
+            }
+        }
+    }
+
+    return clon;
+}
+
 // QUÉ: Liberar memoria asignada para la imagen.
 // CÓMO: Libera cada fila y canal de la matriz 3D, luego el arreglo de filas y
 // reinicia la estructura.

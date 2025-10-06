@@ -1,8 +1,10 @@
-# parcial2_sistemasoperativos
-## nombres : juan gonzalo de los rios 
-camilo 
-isabella bejarano
-## descripcion: realizar un programa de edicion de fotos en donde se puede hacer las funciones de : rotacion de imagenes, aumento de brillo y tambien disminuirlo, reajuste de borde, escarlar la imagen, vista de pixeles, filtro gausiano 
- -como se corre 
- - que comando de usaron
- - 
+# PROCESADOR DE IMAGENES CONCURRENTE
+## nombres:
+##### juan gonzalo de los rios 
+##### Camilo Arbelaez
+##### Isabella Bejarano
+# descripcion:
+Programa en C para procesamiento de imágenes PNG usando pthreads. Implementa operaciones matriciales con procesamiento paralelo para imágenes en escala de grises y RGB
+
+
+ 
